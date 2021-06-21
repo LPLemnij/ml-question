@@ -1,0 +1,139 @@
+import torch.nn as nn
+import torch.utils.checkpoint as checkpoint 
+
+def get_layer_padding(output_channels, input_channels, kernel_size, stride, dilation):
+  two_p = stride * (output_channels - 1) + (kernel_size - 1) * (dilation - 1) + kernel_size - input_channels
+  return two_p / 2
+  
+class SiameseNetwork(nn.Module):
+  def __init__(self):
+    super(SiameseNetwork, self).__init__()
+    padding_first_conv_layer = int(get_layer_padding(96, 3, 11, 4, 1))
+    padding_second_conv_layer = int(get_layer_padding(256, 96, 11, 1, 1))
+    padding_third_conv_layer = int(get_layer_padding(384, 256, 3, 1, 1))
+    padding_fourth_conv_layer = int(get_layer_padding(384, 384, 3, 1, 1))
+    padding_fifth_conv_layer = int(get_layer_padding(256, 384, 3, 1, 1))
+    padding_sixth_conv_layer = int(get_layer_padding(1024, 256, 7, 1, 1))
+
+    self.encoder_1 = nn.Sequential(
+      nn.Conv2d(in_channels=3, out_channels=96, kernel_size=11, stride=4, padding=padding_first_conv_layer, bias=False),
+      nn.BatchNorm2d(96),
+      nn.SELU(inplace=True),
+      nn.MaxPool2d(3, 2),
+
+      nn.Conv2d(in_channels=96, out_channels=256, kernel_size=5, stride=1, padding='same', bias=False),
+      nn.BatchNorm2d(256),
+      nn.SELU(inplace=True),
+      nn.MaxPool2d(3, 2),
+
+      nn.Conv2d(in_channels=256, out_channels=384, kernel_size=3, stride=1, padding='same', bias=False),
+      nn.BatchNorm2d(384),
+      nn.SELU(inplace=True),
+      nn.Conv2d(in_channels=384, out_channels=384, kernel_size=3, stride=1, padding='same', bias=False),
+      nn.BatchNorm2d(384),
+      nn.SELU(inplace=True),
+      nn.Conv2d(in_channels=384, out_channels=256, kernel_size=3, stride=1, padding='same', bias=False),
+      nn.BatchNorm2d(256),
+      nn.SELU(inplace=True),
+      nn.MaxPool2d(3, 2),
+
+      nn.Conv2d(in_channels=256, out_channels=1024, kernel_size=7, stride=1, padding='valid', bias=False),
+      nn.BatchNorm2d(1024),
+      nn.SELU(inplace=True),
+    )
+
+    self.encoder_2 = nn.Sequential(
+      nn.Conv2d(in_channels=3, out_channels=96, kernel_size=11, stride=4, padding=padding_first_conv_layer, bias=False),
+      nn.BatchNorm2d(96),
+      nn.SELU(inplace=True),
+      nn.MaxPool2d(3, 2),
+
+      nn.Conv2d(in_channels=96, out_channels=256, kernel_size=5, stride=1, padding='same', bias=False),
+      nn.BatchNorm2d(256),
+      nn.SELU(inplace=True),
+      nn.MaxPool2d(3, 2),
+
+      nn.Conv2d(in_channels=256, out_channels=384, kernel_size=3, stride=1, padding='same', bias=False),
+      nn.BatchNorm2d(384),
+      nn.SELU(inplace=True),
+      nn.Conv2d(in_channels=384, out_channels=384, kernel_size=3, stride=1, padding='same', bias=False),
+      nn.BatchNorm2d(384),
+      nn.SELU(inplace=True),
+      nn.Conv2d(in_channels=384, out_channels=256, kernel_size=3, stride=1, padding='same', bias=False),
+      nn.BatchNorm2d(256),
+      nn.SELU(inplace=True),
+      nn.MaxPool2d(3, 2),
+
+      nn.Conv2d(in_channels=256, out_channels=1024, kernel_size=7, stride=1, padding='valid', bias=False),
+      nn.BatchNorm2d(1024),
+      nn.SELU(inplace=True),
+    )
+  
+    self.decoder_1 = nn.Sequential(
+        nn.ConvTranspose2d(2, 128, 5, 2),
+        nn.SELU(inplace=True),
+        nn.ConvTranspose2d(128, 64, 5, 2),
+        nn.SELU(inplace=True),
+        nn.ConvTranspose2d(64, 32, 5, 2),
+        nn.SELU(inplace=True),
+        nn.ConvTranspose2d(32, 16, 5, 2),
+        nn.SELU(inplace=True),
+        nn.ConvTranspose2d(16, 8, 5, 2),
+        nn.SELU(inplace=True),
+        nn.ConvTranspose2d(8, 4, 5, 2),
+        nn.SELU(inplace=True),
+        nn.ConvTranspose2d(4, 3, 5, 2),
+        nn.Sigmoid(),
+    )
+
+    self.decoder_2 = nn.Sequential(
+        nn.ConvTranspose2d(2, 128, 5, 2),
+        nn.SELU(inplace=True),
+        nn.ConvTranspose2d(128, 64, 5, 2),
+        nn.SELU(inplace=True),
+        nn.ConvTranspose2d(64, 32, 5, 2),
+        nn.SELU(inplace=True),
+        nn.ConvTranspose2d(32, 16, 5, 2),
+        nn.SELU(inplace=True),
+        nn.ConvTranspose2d(16, 8, 5, 2),
+        nn.SELU(inplace=True),
+        nn.ConvTranspose2d(8, 4, 5, 2),
+        nn.SELU(inplace=True),
+        nn.ConvTranspose2d(4, 3, 5, 2),
+        nn.Sigmoid(),
+    )
+
+  def checkpoint_encode(self):
+    def custom_forward(*inputs):
+      input1, input2 = inputs
+      encoded_input1 = self.encoder_1(input1)
+      encoded_input2 = self.encoder_2(input2)
+      return encoded_input1.data, encoded_input2.data
+    return custom_forward
+
+  def checkpoint_decode(self):
+    def custom_forward(*inputs):
+      input1, input2 = inputs
+      decoded_output1 = self.decoder_1(input1)
+      decoded_output2 = self.decoder_2(input2)
+      return decoded_output1.data, decoded_output2.data
+    return custom_forward
+
+  def forward(self, input1, input2):
+    encoding_func = self.checkpoint_encode()
+    decoding_func = self.checkpoint_decode()
+    # encoded_input1 = checkpoint.checkpoint_sequential(self.encoder_1, 16, input1)
+    # encoded_input2 = checkpoint.checkpoint_sequential(self.encoder_2, 16, input2)
+    encoded_input1, encoded_input2 = checkpoint.checkpoint(encoding_func, input1, input2)
+    # encoded_input1 = self.encoder_1(input1)
+    # encoded_input2 = self.encoder_1(input2)
+    encoded_input1_resized = encoded_input1.view(2, 2, 256, -1)
+    print(encoded_input1_resized.element_size() * encoded_input1_resized.nelement())
+    encoded_input2_resized = encoded_input2.view(2, 2, 256, -1)
+    # decoded_output1 = checkpoint.checkpoint_sequential(self.decoder_1, 16, encoded_input1_resized)
+    # decoded_output2 = checkpoint.checkpoint_sequential(self.decoder_2, 16, encoded_input2_resized)
+    decoded_output1, decoded_output2 = checkpoint.checkpoint(decoding_func, encoded_input1_resized, encoded_input2_resized)
+    # decoded_output1 = self.decoder_1(encoded_input1_resized)
+    # decoded_output2 = self.decoder_2(encoded_input2_resized)
+
+    return encoded_input1, encoded_input2, decoded_output1, decoded_output2
